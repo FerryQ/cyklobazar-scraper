@@ -1,14 +1,24 @@
 {
     "urls": [
         {
-            "url": "https://www.cyklobazar.cz/gravel-bike"
+            "url": "https://www.cyklobazar.cz/gravel-bike?filter%5BpriceMin%5D=18000&filter%5BpriceMax%5D=40000&filter%5Bloc_city_id%5D=1"
         }
     ],
-    "detailedOutput": false,
-    "startDate": "2026-04-01",
+    "detailedOutput": true,
+    "startDate": "2026-04-27",
     "telegramToken": "",
     "telegramChatId": "",
     "outputFile": "output/offers.jsonl",
     "stateFile": "state/seen_offers.json",
-    "requestDelaySeconds": 0.5
+    "requestDelaySeconds": 0.5,
+    "geminiApiKey": "",
+    "geminiModel": "gemini-2.0-flash",
+    "minProfitCzk": 10000,
+    "onlyVeryUndervalued": false,
+    "geminiMinIntervalSeconds": 1.5,
+    "geminiRequestsPerMinute": 5,
+    "geminiRateLimitWindowSeconds": 60,
+    "geminiMaxRetries": 1,
+    "geminiRetryBaseDelaySeconds": 2.0,
+    "disableGeminiOnRateLimit": true
 }

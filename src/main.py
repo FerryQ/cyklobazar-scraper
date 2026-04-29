@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,52 @@ def build_settings(config: dict[str, Any]) -> ScraperSettings:
     )
     if request_delay_seconds < 0:
         raise ValueError("requestDelaySeconds must be >= 0")
-    # todo: create ouput_file and state_file if it doesnt exist already
+
+    min_profit_czk = int(pick(config, "minProfitCzk", "min_profit_czk", default=10000))
+    if min_profit_czk < 0:
+        raise ValueError("minProfitCzk must be >= 0")
+
+    gemini_min_interval_seconds = float(
+        pick(config, "geminiMinIntervalSeconds", "gemini_min_interval_seconds", default=1.5),
+    )
+    if gemini_min_interval_seconds < 0:
+        raise ValueError("geminiMinIntervalSeconds must be >= 0")
+
+    gemini_max_retries = int(pick(config, "geminiMaxRetries", "gemini_max_retries", default=1))
+    if gemini_max_retries < 0:
+        raise ValueError("geminiMaxRetries must be >= 0")
+
+    gemini_retry_base_delay_seconds = float(
+        pick(config, "geminiRetryBaseDelaySeconds", "gemini_retry_base_delay_seconds", default=2.0),
+    )
+    if gemini_retry_base_delay_seconds <= 0:
+        raise ValueError("geminiRetryBaseDelaySeconds must be > 0")
+
+    gemini_requests_per_minute = int(
+        pick(config, "geminiRequestsPerMinute", "gemini_requests_per_minute", default=5),
+    )
+    if gemini_requests_per_minute <= 0:
+        raise ValueError("geminiRequestsPerMinute must be > 0")
+
+    gemini_rate_limit_window_seconds = int(
+        pick(
+            config,
+            "geminiRateLimitWindowSeconds",
+            "gemini_rate_limit_window_seconds",
+            default=60,
+        ),
+    )
+    if gemini_rate_limit_window_seconds <= 0:
+        raise ValueError("geminiRateLimitWindowSeconds must be > 0")
+
+    disable_gemini_on_rate_limit = bool(
+        pick(config, "disableGeminiOnRateLimit", "disable_gemini_on_rate_limit", default=True),
+    )
+
+    gemini_api_key = pick(config, "geminiApiKey", "gemini_api_key", default=os.getenv("GEMINI_API_KEY"))
+    if not isinstance(gemini_api_key, str) or not gemini_api_key.strip():
+        raise ValueError("geminiApiKey is required (config key or GEMINI_API_KEY env var)")
+
     return ScraperSettings(
         urls=normalize_urls(pick(config, "urls")),
         detailed_output=bool(pick(config, "detailedOutput", "detailed_output", default=False)),
@@ -73,6 +119,18 @@ def build_settings(config: dict[str, Any]) -> ScraperSettings:
         output_file=Path(pick(config, "outputFile", "output_file", default="output/offers.jsonl")),
         state_file=Path(pick(config, "stateFile", "state_file", default="state/seen_offers.json")),
         request_delay_seconds=request_delay_seconds,
+        gemini_api_key=gemini_api_key.strip(),
+        gemini_model=str(pick(config, "geminiModel", "gemini_model", default="gemini-2.0-flash")),
+        min_profit_czk=min_profit_czk,
+        gemini_min_interval_seconds=gemini_min_interval_seconds,
+        gemini_max_retries=gemini_max_retries,
+        gemini_retry_base_delay_seconds=gemini_retry_base_delay_seconds,
+        gemini_requests_per_minute=gemini_requests_per_minute,
+        gemini_rate_limit_window_seconds=gemini_rate_limit_window_seconds,
+        disable_gemini_on_rate_limit=disable_gemini_on_rate_limit,
+        only_very_undervalued=bool(
+            pick(config, "onlyVeryUndervalued", "only_very_undervalued", default=False),
+        ),
     )
 
 
