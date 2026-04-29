@@ -1,15 +1,16 @@
-.claude
-.agents
-# This file tells Git which files shouldn't be added to source control
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
 
-.DS_Store
-.idea
-.vscode
-.zed
-dist
-node_modules
-apify_storage
-storage
+# uv / Virtual Environments
+.venv/
+.python-version
 
-# Added by Apify CLI
-.venv
+# Project Specific Data
+output/
+state/
+
+# Secrets and Logs
+config.json
+*.log

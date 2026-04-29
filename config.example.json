@@ -1,0 +1,14 @@
+{
+    "urls": [
+        {
+            "url": "https://www.cyklobazar.cz/gravel-bike"
+        }
+    ],
+    "detailedOutput": false,
+    "startDate": "2026-04-01",
+    "telegramToken": "",
+    "telegramChatId": "",
+    "outputFile": "output/offers.jsonl",
+    "stateFile": "state/seen_offers.json",
+    "requestDelaySeconds": 0.5
+}
