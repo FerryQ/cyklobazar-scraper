@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -106,7 +107,18 @@ def build_settings(config: dict[str, Any]) -> ScraperSettings:
         pick(config, "disableGeminiOnRateLimit", "disable_gemini_on_rate_limit", default=True),
     )
 
-    gemini_api_key = pick(config, "geminiApiKey", "gemini_api_key", default=os.getenv("GEMINI_API_KEY"))
+    max_age_days = pick(config, "maxAgeDays", "max_age_days")
+    if max_age_days is not None:
+        max_age_days = int(max_age_days)
+        if max_age_days < 0:
+            raise ValueError("maxAgeDays must be >= 0")
+
+    max_pages = int(pick(config, "maxPages", "max_pages", default=20))
+    if max_pages <= 0:
+        raise ValueError("maxPages must be > 0")
+
+    # `or` rather than `default=`, so an empty "" in config.json still falls back to the env var.
+    gemini_api_key = pick(config, "geminiApiKey", "gemini_api_key") or os.getenv("GEMINI_API_KEY")
     if not isinstance(gemini_api_key, str) or not gemini_api_key.strip():
         raise ValueError("geminiApiKey is required (config key or GEMINI_API_KEY env var)")
 
@@ -114,8 +126,10 @@ def build_settings(config: dict[str, Any]) -> ScraperSettings:
         urls=normalize_urls(pick(config, "urls")),
         detailed_output=bool(pick(config, "detailedOutput", "detailed_output", default=False)),
         start_date=pick(config, "startDate", "start_date"),
-        telegram_token=pick(config, "telegramToken", "telegram_token"),
-        telegram_chat_id=pick(config, "telegramChatId", "telegram_chat_id"),
+        max_age_days=max_age_days,
+        max_pages=max_pages,
+        telegram_token=pick(config, "telegramToken", "telegram_token") or os.getenv("TELEGRAM_TOKEN"),
+        telegram_chat_id=pick(config, "telegramChatId", "telegram_chat_id") or os.getenv("TELEGRAM_CHAT_ID"),
         output_file=Path(pick(config, "outputFile", "output_file", default="output/offers.jsonl")),
         state_file=Path(pick(config, "stateFile", "state_file", default="state/seen_offers.json")),
         database_file=Path(pick(config, "databaseFile", "database_file", default="data/offers.db")),
@@ -145,16 +159,33 @@ def main() -> int:
     try:
         config = load_config(args.config)
         settings = build_settings(config)
-        scraper = CyklobazarScraper(settings)
-        scraped = scraper.run()
-        logging.info("Finished. Scraped %s offers.", scraped)
-        return 0
+        interval_minutes = float(pick(config, "intervalMinutes", "interval_minutes", default=0))
+    except Exception as exc:
+        logging.error("Invalid configuration: %s", exc)
+        return 1
+
+    try:
+        if interval_minutes <= 0:
+            return run_once(settings)
+
+        # Run forever (e.g. in Docker); a failed run is logged and retried on the next tick.
+        while True:
+            run_once(settings)
+            logging.info("Next run in %.0f minutes.", interval_minutes)
+            time.sleep(interval_minutes * 60)
     except KeyboardInterrupt:
         logging.warning("Interrupted by user.")
         return 130
+
+
+def run_once(settings: ScraperSettings) -> int:
+    try:
+        scraped = CyklobazarScraper(settings).run()
     except Exception as exc:
         logging.error("Scraper failed: %s", exc)
         return 1
+    logging.info("Finished. Scraped %s offers.", scraped)
+    return 0
 
 
 if __name__ == "__main__":

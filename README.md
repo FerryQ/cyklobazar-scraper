@@ -8,7 +8,8 @@ It scrapes offers from [cyklobazar.cz](https://www.cyklobazar.cz), evaluates val
 - No Apify dependency
 - Listing-page scraping with pagination
 - Optional detailed mode (visit every offer page for full description)
-- Optional start-date filtering (`YYYY-MM-DD`)
+- Only recent offers: `maxAgeDays` (rolling window) and/or `startDate` (`YYYY-MM-DD`); pagination stops at the first page with nothing recent, capped by `maxPages`
+- Optional built-in scheduler (`intervalMinutes`) for running in Docker
 - Local dedup state for Telegram notifications (`seen_offers.json`)
 - Gemini valuation of each offer (`undervalued` / `fairly_priced` / `overvalued`)
 - Optional filter for only very undervalued offers (min profit threshold in CZK)
@@ -18,25 +19,38 @@ It scrapes offers from [cyklobazar.cz](https://www.cyklobazar.cz), evaluates val
 
 ### Setup
 
-1. Use Python 3.11+.
-2. Create a virtual environment.
-3. Install dependencies:
+1. Use Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+2. Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-4. Copy and edit config:
+3. Copy and edit config:
 
 ```bash
 cp config.example.json config.json
 ```
 
-5. Run:
+4. Run:
 
 ```bash
-python src/main.py --config config.json
+uv run src/main.py --config config.json
 ```
+
+### Docker
+
+```bash
+cp config.example.json config.json   # leave the secrets empty here
+cp .env.example .env                 # put secrets and DATA_DIR here
+sudo mkdir -p /srv/cyklobazar && sudo chown 1000:1000 /srv/cyklobazar
+docker compose up -d --build
+docker compose logs -f
+```
+
+The container runs as a non-root user with a read-only filesystem and only writes to `DATA_DIR`
+(database, state and JSONL output). With `intervalMinutes` set it runs forever, scraping every N minutes;
+without it, it scrapes once and exits.
 
 ### Config format
 
@@ -46,7 +60,9 @@ python src/main.py --config config.json
 {
     "urls": [{ "url": "https://www.cyklobazar.cz/gravel-bike" }],
     "detailedOutput": false,
-    "startDate": "2026-04-01",
+    "maxAgeDays": 3,
+    "maxPages": 20,
+    "intervalMinutes": 60,
     "telegramToken": "",
     "telegramChatId": "",
     "outputFile": "output/offers.jsonl",
@@ -67,7 +83,8 @@ python src/main.py --config config.json
 ```
 
 You can also provide `urls` as a simple string array.
-`geminiApiKey` can also be provided through the `GEMINI_API_KEY` environment variable.
+Secrets can be left empty in the config and provided through the `GEMINI_API_KEY`, `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` environment variables.
+You can still set `startDate` (`YYYY-MM-DD`); if both it and `maxAgeDays` are set, the later cutoff wins.
 
 ### Output
 

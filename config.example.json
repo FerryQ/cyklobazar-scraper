@@ -5,7 +5,9 @@
         }
     ],
     "detailedOutput": true,
-    "startDate": "2026-04-27",
+    "maxAgeDays": 3,
+    "maxPages": 20,
+    "intervalMinutes": 60,
     "telegramToken": "",
     "telegramChatId": "",
     "outputFile": "output/offers.jsonl",

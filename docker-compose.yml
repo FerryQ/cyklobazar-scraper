@@ -1,0 +1,23 @@
+services:
+  cyklobazar-scraper:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.json:/config/config.json:ro
+      # Put this on the SSD, e.g. DATA_DIR=/srv/cyklobazar in .env. Must be writable by uid 1000.
+      - ${DATA_DIR:-./data}:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

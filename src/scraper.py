@@ -6,7 +6,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urljoin, urlparse
@@ -31,7 +31,7 @@ GEMINI_SYSTEM_INSTRUCTION = (
     "Vyhni se optimismu, zejmena u starsich kol a nejasneho stavu. "
     "Prioritizuj odhad, ktery by byl dosazitelny pri realnem rychlem prodeji, ne idealni nabidkove cene. "
     "Vrat pouze JSON objekt se schema: "
-    "verdict, estimatedMarketPriceCzk, listingPriceCzk, expectedProfitCzk, confidence, reasoning."
+    "verdict, estimatedMarketPriceCzk, confidence, reasoning."
 )
 
 
@@ -96,6 +96,8 @@ class ScraperSettings:
     output_file: Path
     state_file: Path
     database_file: Path = Path("data/offers.db")
+    max_age_days: int | None = None
+    max_pages: int = 20
     request_delay_seconds: float = 0.0
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
@@ -118,7 +120,7 @@ class CyklobazarScraper:
                 "User-Agent": "cyklobazar-fanda/1.0 (+https://www.cyklobazar.cz/)",
             },
         )
-        self.start_date = parse_iso_date(settings.start_date) if settings.start_date else None
+        self.cutoff = resolve_cutoff(settings.start_date, settings.max_age_days)
         self.seen_offers = load_seen_offers(settings.state_file, PRUNE_AFTER_DAYS)
         LOGGER.info("Loaded %s seen offers.", len(self.seen_offers))
         self._output_handle: TextIO | None = None
@@ -140,7 +142,10 @@ class CyklobazarScraper:
             self._db = db
             try:
                 for url in self.settings.urls:
-                    self._crawl_listing_pages(url)
+                    try:
+                        self._crawl_listing_pages(url)
+                    except requests.RequestException as exc:
+                        LOGGER.error("Failed to crawl %s (blocked by Cloudflare?): %s", url, exc)
             finally:
                 save_seen_offers(self.settings.state_file, self.seen_offers)
                 self._output_handle = None
@@ -149,37 +154,52 @@ class CyklobazarScraper:
         return self._scraped_count
 
     def _crawl_listing_pages(self, start_url: str) -> None:
-        queue: list[str] = [start_url]
+        current_url: str | None = start_url
         visited: set[str] = set()
 
-        while queue:
-            current_url = queue.pop(0)
-            if current_url in visited:
-                continue
+        while current_url and current_url not in visited:
+            if len(visited) >= self.settings.max_pages:
+                LOGGER.info("Reached maxPages=%s, stopping at %s", self.settings.max_pages, current_url)
+                return
             visited.add(current_url)
 
             soup = self._fetch_soup(current_url)
-            offers = scrape_listing_offer_infos(soup, self.start_date, current_url)
+            offers = scrape_listing_offer_infos(soup, current_url)
+            recent_offers = [offer for offer in offers if self._is_recent(offer)]
+            LOGGER.info("Found %s offers (%s recent) on %s", len(offers), len(recent_offers), current_url)
 
-            if offers:
-                LOGGER.info("Found %s offers on %s", len(offers), current_url)
-            else:
-                LOGGER.info("No matching offers on %s", current_url)
-
+            # Record every listing on the page, old ones included: they are comparables for valuation.
             for offer in offers:
-                # Record every listing (seen or not) so the database tracks price changes and last_seen.
                 self._record_offer(offer)
-                if offer_id(offer.url) in self.seen_offers:
+
+            for offer in recent_offers:
+                listing_id = offer_id(offer.url)
+                if listing_id in self.seen_offers:
+                    # Refresh, so offers that stay listed are not pruned and notified again.
+                    self.seen_offers[listing_id] = datetime.now(timezone.utc).isoformat()
                     LOGGER.info("Already seen, skipping: %s", offer.url)
                     continue
                 if self.settings.detailed_output:
-                    offer = self._fetch_offer_details(offer.url)
+                    try:
+                        offer = self._fetch_offer_details(offer.url)
+                    except requests.RequestException as exc:
+                        LOGGER.warning("Failed to fetch details for %s, will retry next run: %s", offer.url, exc)
+                        continue
                     self._record_offer(offer)
                 self._emit_offer(offer)
 
-            next_page = scrape_next_page(soup, current_url)
-            if next_page and next_page not in visited:
-                queue.append(next_page)
+            # Listings are sorted newest first, so a page with nothing recent means the rest is older too.
+            if offers and not recent_offers:
+                LOGGER.info("No recent offers on %s, stopping pagination.", current_url)
+                return
+
+            current_url = scrape_next_page(soup, current_url)
+
+    def _is_recent(self, offer: Offer) -> bool:
+        if self.cutoff is None:
+            return True
+        created = iso_to_datetime(offer.created)
+        return created is None or created >= self.cutoff
 
     def _fetch_soup(self, url: str) -> BeautifulSoup:
         LOGGER.info("Fetching %s", url)
@@ -293,9 +313,7 @@ class CyklobazarScraper:
             "Vyhodnot cenu kola pouze na základě titulku, popisu a uvedené ceny inzerátu. "
             "Vrat pouze JSON objekt bez dalsiho textu s poli: "
             "verdict (jedno z: undervalued, fairly_priced, overvalued, unknown; unknown pouzij, pokud nelze cenu spolehlive vyhodnotit), "
-            "estimatedMarketPriceCzk (integer), listingPriceCzk (integer), "
-            "expectedProfitCzk (integer), confidence (low|medium|high), reasoning (krátký text). "
-            "expectedProfitCzk nastav jako estimatedMarketPriceCzk - listingPriceCzk.\n\n"
+            "estimatedMarketPriceCzk (integer), confidence (low|medium|high), reasoning (krátký text).\n\n"
             f"Titulek: {offer.title}\n"
             f"Popis: {offer.description}\n"
             f"Uvedena cena CZK: {listed_price}\n"
@@ -310,8 +328,8 @@ class CyklobazarScraper:
             verdict_raw = "unknown"
 
         estimated_price = int_or_none(parsed.get("estimatedMarketPriceCzk"))
-        listing_price = int_or_none(parsed.get("listingPriceCzk"))
-        expected_profit = int_or_none(parsed.get("expectedProfitCzk"))
+        # Compute the profit ourselves from the known listed price instead of trusting the model's arithmetic.
+        expected_profit = estimated_price - listed_price if estimated_price is not None else None
         confidence = str(parsed.get("confidence", "low")).strip().lower()
         reasoning = str(parsed.get("reasoning", "")).strip()
         if not reasoning:
@@ -320,7 +338,7 @@ class CyklobazarScraper:
         return OfferValuation(
             verdict=verdict_raw,
             estimated_market_price_czk=estimated_price,
-            listing_price_czk=listing_price,
+            listing_price_czk=listed_price,
             expected_profit_czk=expected_profit,
             confidence=confidence,
             reasoning=reasoning,
@@ -333,7 +351,8 @@ class CyklobazarScraper:
             try:
                 response = requests.post(
                     url,
-                    params={"key": self.settings.gemini_api_key},
+                    # Header, not a URL param: request errors include the URL and end up in logs.
+                    headers={"x-goog-api-key": self.settings.gemini_api_key},
                     timeout=HTTP_TIMEOUT_SECONDS,
                     json={
                         "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_INSTRUCTION}]},
@@ -431,6 +450,16 @@ def parse_iso_date(value: str) -> datetime:
         raise ValueError(f"Invalid start date '{value}'. Use YYYY-MM-DD.") from exc
 
 
+def resolve_cutoff(start_date: str | None, max_age_days: int | None) -> datetime | None:
+    """Offers created before the returned moment are ignored; the stricter of the two settings wins."""
+    candidates: list[datetime] = []
+    if start_date:
+        candidates.append(parse_iso_date(start_date))
+    if max_age_days is not None:
+        candidates.append(datetime.now(timezone.utc) - timedelta(days=max_age_days))
+    return max(candidates, default=None)
+
+
 def parse_czech_date(text: str) -> datetime | None:
     match = re.search(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})", text)
     if not match:
@@ -449,11 +478,7 @@ def scrape_next_page(soup: BeautifulSoup, base_url: str) -> str | None:
     return urljoin(base_url, href)
 
 
-def scrape_listing_offer_infos(
-    soup: BeautifulSoup,
-    start_date: datetime | None,
-    base_url: str,
-) -> list[Offer]:
+def scrape_listing_offer_infos(soup: BeautifulSoup, base_url: str) -> list[Offer]:
     offers: list[Offer] = []
     for anchor in soup.select('a.cb-offer[href*="/inzerat/"]'):
         if not isinstance(anchor, Tag):
@@ -464,8 +489,6 @@ def scrape_listing_offer_infos(
 
         published_raw = attr_or_empty(anchor.select_one(".cb-time-ago"), "title")
         published_date = parse_czech_date(published_raw)
-        if start_date and published_date and published_date < start_date:
-            continue
 
         href = anchor.get("href")
         if not isinstance(href, str):
