@@ -118,6 +118,7 @@ def build_settings(config: dict[str, Any]) -> ScraperSettings:
         telegram_chat_id=pick(config, "telegramChatId", "telegram_chat_id"),
         output_file=Path(pick(config, "outputFile", "output_file", default="output/offers.jsonl")),
         state_file=Path(pick(config, "stateFile", "state_file", default="state/seen_offers.json")),
+        database_file=Path(pick(config, "databaseFile", "database_file", default="data/offers.db")),
         request_delay_seconds=request_delay_seconds,
         gemini_api_key=gemini_api_key.strip(),
         gemini_model=str(pick(config, "geminiModel", "gemini_model", default="gemini-2.0-flash")),

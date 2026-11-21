@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from db import OfferDatabase
 from notifications import send_telegram_message
 from state import load_seen_offers, save_seen_offers
 
@@ -94,6 +95,7 @@ class ScraperSettings:
     telegram_chat_id: str | None
     output_file: Path
     state_file: Path
+    database_file: Path = Path("data/offers.db")
     request_delay_seconds: float = 0.0
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
@@ -120,6 +122,7 @@ class CyklobazarScraper:
         self.seen_offers = load_seen_offers(settings.state_file, PRUNE_AFTER_DAYS)
         LOGGER.info("Loaded %s seen offers.", len(self.seen_offers))
         self._output_handle: TextIO | None = None
+        self._db: OfferDatabase | None = None
         self._scraped_count = 0
         self._next_gemini_request_at = 0.0
         self._gemini_request_times: deque[float] = deque()
@@ -129,14 +132,19 @@ class CyklobazarScraper:
         self.settings.output_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings.state_file.parent.mkdir(parents=True, exist_ok=True)
 
-        with self.settings.output_file.open("a", encoding="utf-8") as output_handle:
+        with (
+            self.settings.output_file.open("a", encoding="utf-8") as output_handle,
+            OfferDatabase(self.settings.database_file) as db,
+        ):
             self._output_handle = output_handle
+            self._db = db
             try:
                 for url in self.settings.urls:
                     self._crawl_listing_pages(url)
             finally:
                 save_seen_offers(self.settings.state_file, self.seen_offers)
                 self._output_handle = None
+                self._db = None
 
         return self._scraped_count
 
@@ -158,13 +166,16 @@ class CyklobazarScraper:
             else:
                 LOGGER.info("No matching offers on %s", current_url)
 
-            if self.settings.detailed_output:
-                for offer in offers:
-                    detailed_offer = self._fetch_offer_details(offer.url)
-                    self._emit_offer(detailed_offer)
-            else:
-                for offer in offers:
-                    self._emit_offer(offer)
+            for offer in offers:
+                # Record every listing (seen or not) so the database tracks price changes and last_seen.
+                self._record_offer(offer)
+                if offer_id(offer.url) in self.seen_offers:
+                    LOGGER.info("Already seen, skipping: %s", offer.url)
+                    continue
+                if self.settings.detailed_output:
+                    offer = self._fetch_offer_details(offer.url)
+                    self._record_offer(offer)
+                self._emit_offer(offer)
 
             next_page = scrape_next_page(soup, current_url)
             if next_page and next_page not in visited:
@@ -190,26 +201,30 @@ class CyklobazarScraper:
             created=created_date.isoformat() if created_date else None,
             url=url,
         )
+
+    def _record_offer(self, offer: Offer) -> None:
+        if self._db is None:
+            raise RuntimeError("Database is not initialized")
+        self._db.record_offer(offer_id(offer.url), offer, parse_czk_price(offer.price))
+
     def _emit_offer(self, offer: Offer) -> None:
-        if self._output_handle is None:
+        if self._output_handle is None or self._db is None:
             raise RuntimeError("Output handle is not initialized")
 
-        offer_id = urlparse(offer.url).path
-        if offer_id in self.seen_offers:
-            LOGGER.info("Already seen, skipping Telegram: %s", offer_id)
-            return
-
-        try:
-            valuation = self._evaluate_offer_value(offer)
-        except (requests.RequestException, ValueError) as exc:
-            LOGGER.warning("Failed to value offer %s, continuing with unknown valuation: %s", offer.url, exc)
-            valuation = self._build_unknown_valuation(offer, str(exc))
+        listing_id = offer_id(offer.url)
+        valuation, valuation_ok = self._value_offer(offer)
         offer.valuation = valuation
+        if valuation_ok:
+            self._db.save_valuation(listing_id, valuation)
 
-        self.seen_offers[offer_id] = datetime.now(timezone.utc).isoformat()
         if self.settings.only_very_undervalued and not valuation.is_very_undervalued(
             self.settings.min_profit_czk,
         ):
+            if not valuation_ok:
+                # Don't mark as seen, otherwise a failed valuation would hide the offer forever.
+                LOGGER.info("Valuation failed for %s, will retry next run.", offer.url)
+                return
+            self.seen_offers[listing_id] = datetime.now(timezone.utc).isoformat()
             LOGGER.info(
                 "Skipping not-undervalued offer %s: verdict=%s expectedProfit=%s CZK",
                 offer.url,
@@ -218,6 +233,7 @@ class CyklobazarScraper:
             )
             return
 
+        self.seen_offers[listing_id] = datetime.now(timezone.utc).isoformat()
         json.dump(offer.to_dict(), self._output_handle, ensure_ascii=False)
         self._output_handle.write("\n")
         self._scraped_count += 1
@@ -258,10 +274,17 @@ class CyklobazarScraper:
         if self.settings.request_delay_seconds > 0:
             time.sleep(self.settings.request_delay_seconds)
 
-    def _evaluate_offer_value(self, offer: Offer) -> OfferValuation:
+    def _value_offer(self, offer: Offer) -> tuple[OfferValuation, bool]:
+        """Return the valuation and whether it succeeded (failed ones get verdict 'unknown')."""
         if self._gemini_disabled_reason:
-            return self._build_unknown_valuation(offer, self._gemini_disabled_reason)
+            return self._build_unknown_valuation(offer, self._gemini_disabled_reason), False
+        try:
+            return self._evaluate_offer_value(offer), True
+        except (requests.RequestException, ValueError) as exc:
+            LOGGER.warning("Failed to value offer %s, continuing with unknown valuation: %s", offer.url, exc)
+            return self._build_unknown_valuation(offer, str(exc)), False
 
+    def _evaluate_offer_value(self, offer: Offer) -> OfferValuation:
         listed_price = parse_czk_price(offer.price)
         if listed_price is None:
             raise ValueError(f"Could not parse CZK price from '{offer.price}'")
@@ -435,7 +458,8 @@ def scrape_listing_offer_infos(
     for anchor in soup.select('a.cb-offer[href*="/inzerat/"]'):
         if not isinstance(anchor, Tag):
             continue
-        if has_ancestor_with_class(anchor, "cb-offer-list--vertical"):
+        # Promoted/recommended offers are rendered as vertical cards; they ignore the category and date filters.
+        if "cb-offer--vertical" in (anchor.get("class") or []):
             continue
 
         published_raw = attr_or_empty(anchor.select_one(".cb-time-ago"), "title")
@@ -461,13 +485,8 @@ def scrape_listing_offer_infos(
     return offers
 
 
-def has_ancestor_with_class(node: Tag, class_name: str) -> bool:
-    for parent in node.parents:
-        if isinstance(parent, Tag):
-            classes = parent.get("class", [])
-            if isinstance(classes, list) and class_name in classes:
-                return True
-    return False
+def offer_id(url: str) -> str:
+    return urlparse(url).path
 
 
 def text_or_empty(node: Tag | None) -> str:

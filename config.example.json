@@ -10,6 +10,7 @@
     "telegramChatId": "",
     "outputFile": "output/offers.jsonl",
     "stateFile": "state/seen_offers.json",
+    "databaseFile": "data/offers.db",
     "requestDelaySeconds": 0.5,
     "geminiApiKey": "",
     "geminiModel": "gemini-2.0-flash",

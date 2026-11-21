@@ -51,6 +51,7 @@ python src/main.py --config config.json
     "telegramChatId": "",
     "outputFile": "output/offers.jsonl",
     "stateFile": "state/seen_offers.json",
+    "databaseFile": "data/offers.db",
     "requestDelaySeconds": 0.5,
     "geminiApiKey": "",
     "geminiModel": "gemini-2.0-flash",
@@ -72,5 +73,11 @@ You can also provide `urls` as a simple string array.
 
 Each offer is appended as one JSON line to `output/offers.jsonl`.
 The script keeps a local state file to avoid repeat Telegram notifications for already seen offers.
+Offers whose valuation failed (e.g. Gemini errors) are not marked as seen when `onlyVeryUndervalued` is on, so they are retried on the next run.
+
+Every scraped listing (including already seen ones) is also stored in a SQLite database (`data/offers.db`):
+
+- `listings` - latest data per listing, with `first_seen` / `last_seen` timestamps and the last successful valuation
+- `price_history` - one row each time a listing's price changes
 By default, all new offers are written and notified, with valuation reasoning included.
 If Gemini keeps returning `429`, the scraper can auto-disable Gemini for the rest of the run and still send offers with `valuation.verdict = "unknown"` and an explanatory reason.
